@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LztTMR (Firefox)
 // @namespace    https://lolz.team/gay1234
-// @version      1.6.3
+// @version      1.6.4
 // @description  LZT Transfer Modal Revert — Firefox build. Single-screen money transfer dialog for Lolzteam.
 // @updateURL    https://raw.githubusercontent.com/9sx77ssl/LztTMR/main/LztTMR.firefox.user.js
 // @downloadURL  https://raw.githubusercontent.com/9sx77ssl/LztTMR/main/LztTMR.firefox.user.js
@@ -57,7 +57,7 @@
   /* Constants                                                          */
   /* ------------------------------------------------------------------ */
 
-  const VERSION = '1.6.3';
+  const VERSION = '1.6.4';
   const PREFIX = 'lzt-tre';
   const STYLE_ID = 'lzt-tmr-styles';
   const OVERLAY_CLASS = `${PREFIX}-overlay`;
@@ -1644,9 +1644,17 @@
           },
         });
         const avatar = item.rendered?.avatars?.s || item.rendered?.avatars?.m || item.avatar || '';
+        // Keep the server-rendered nickname markup: it carries the user's
+        // colour/gradient/icon classes. Plain `username` loses all of that.
+        const name = el('span', { class: 'lzt-tre-recent-name' });
+        name.append(
+          item.rendered?.username
+            ? sanitizeUsername(item.rendered.username)
+            : doc.createTextNode(item.username || ''),
+        );
         card.append(
           el('img', { class: 'lzt-tre-recent-avatar', src: avatar, alt: '', width: 28, height: 28 }),
-          el('span', { class: 'lzt-tre-recent-name', text: item.username || '' }),
+          name,
         );
         grid.append(card);
       }
@@ -2419,14 +2427,60 @@
     }
   }
 
+  // XenForo's member card (and any other native overlay) stays open while its
+  // transfer link is clicked and keeps enforcing focus on itself. In Firefox
+  // that steals focus from our fields on every click, making the dialog
+  // unusable. Close native overlays instantly before opening our dialog; the
+  // transfer flow itself does not need the card that launched it.
+  function closeNativeOverlays() {
+    const X = getXenForo();
+    const cache = X && X.OverlayLoaderCache;
+    if (!cache || typeof cache !== 'object') return 0;
+
+    let closed = 0;
+    for (const key of Object.keys(cache)) {
+      const overlay = cache[key];
+      if (!overlay || typeof overlay.close !== 'function') continue;
+      try {
+        if (typeof overlay.isOpened === 'function' && !overlay.isOpened()) continue;
+        const conf = typeof overlay.getConf === 'function' ? overlay.getConf() : null;
+        if (conf) {
+          conf.closeSpeed = 0;
+          if (conf.mask) conf.mask.closeSpeed = 0;
+        }
+        overlay.close();
+        closed += 1;
+      } catch (_) { /* a closed/partial overlay must not block the dialog */ }
+    }
+    if (closed) debug('native overlays closed', closed);
+    return closed;
+  }
+
   function openTransfer(options = {}) {
     if (!isLoggedIn()) return false;
     activeDialog?.close();
+    closeNativeOverlays();
     activeDialog = new TransferDialog(options);
     activeDialog.open(options.trigger || null).catch((error) => {
       console.error('[LztTMR] open failed', error);
     });
     return true;
+  }
+
+  // Opening a transfer URL (middle-click, "open in new tab", bookmark or
+  // direct navigation) bypasses the click interceptor. Replace that page with
+  // the same dialog once XenForo has initialised.
+  let directOpenTimer = 0;
+  let directOpenAttempts = 0;
+  function openDirectTransfer() {
+    directOpenTimer = 0;
+    if (activeDialog) return;
+    const parsed = parseTransferLink(location.href);
+    if (!parsed) return;
+    if (openTransfer(parsed)) return;
+    if (directOpenAttempts++ < 30) {
+      directOpenTimer = setTimeout(openDirectTransfer, 100);
+    }
   }
 
   function getTransferLink(event) {
@@ -3378,6 +3432,7 @@
 
   const register = () => {
     injectStyles();
+    if (parseTransferLink(location.href)) openDirectTransfer();
   };
 
   // Register at document-start, before XenForo binds its OverlayTrigger.
